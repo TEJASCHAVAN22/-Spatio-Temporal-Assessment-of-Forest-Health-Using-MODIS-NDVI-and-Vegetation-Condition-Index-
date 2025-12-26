@@ -1,0 +1,147 @@
+// ======================================================
+// 🌲 Forest Health Assessment Using NDVI, EVI, and LAI
+// ======================================================
+
+// 🔹 Step 1: Define Area of Interest (AOI)
+var aoi = ee.FeatureCollection('projects/gee-trial2/assets/Shapfile/WMH_Distric'); // Replace with your AOI
+Map.centerObject(aoi, 7);
+
+// 🔹 Step 2: Define Time Period
+var startDate = '2024-01-01';
+var endDate = '2024-12-31';
+
+// ======================================================
+// 🔹 Step 3: Load Sentinel-2 Image Collection
+// ======================================================
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR')
+           .filterBounds(aoi)
+           .filterDate(startDate, endDate)
+           .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20));
+
+// ======================================================
+// 🔹 Step 4: Calculate NDVI and EVI
+// ======================================================
+var addIndices = function(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  var evi = image.expression(
+    '2.5 * ((NIR - RED) / (NIR + 6*RED - 7.5*BLUE + 1))', {
+      'NIR': image.select('B8'),
+      'RED': image.select('B4'),
+      'BLUE': image.select('B2')
+  }).rename('EVI');
+  return image.addBands([ndvi, evi]);
+};
+
+var s2_indices = s2.map(addIndices);
+
+// ======================================================
+// 🔹 Step 5: Load MODIS LAI Dataset and handle empty collection
+// ======================================================
+var laiCollection = ee.ImageCollection('MODIS/006/MCD15A3H')
+                        .select('Lai')
+                        .filterDate(startDate, endDate)
+                        .map(function(img){ return img.clip(aoi); });
+
+// Check if collection is empty; if yes, create a default zero image
+var meanLAI = ee.Algorithms.If(
+  laiCollection.size().gt(0),
+  laiCollection.mean().clip(aoi),
+  ee.Image(0).rename('Lai').clip(aoi)
+);
+
+// Convert to ee.Image
+meanLAI = ee.Image(meanLAI);
+
+// ======================================================
+// 🔹 Step 6: Calculate Mean NDVI, EVI over AOI
+// ======================================================
+var meanNDVI = s2_indices.select('NDVI').mean().clip(aoi);
+var meanEVI  = s2_indices.select('EVI').mean().clip(aoi);
+
+// // ======================================================
+// // 🔹 Step 7: Visualize Forest Health Indices
+// // ======================================================
+// var ndviParams = {min: 0, max: 1, palette: ['red','yellow','green']};
+// var eviParams  = {min: 0, max: 1, palette: ['red','yellow','green']};
+// var laiParams  = {min: 0, max: 6, palette: ['white','yellow','green']};
+
+// Map.addLayer(meanNDVI, ndviParams, 'Mean NDVI');
+// Map.addLayer(meanEVI, eviParams, 'Mean EVI');
+// Map.addLayer(meanLAI, laiParams, 'Mean LAI');
+
+// ======================================================
+// 🔹 Step 8: Combine Indices into Forest Health Index (FHI)
+// ======================================================
+var fhi = meanNDVI.multiply(0.4)
+           .add(meanEVI.multiply(0.3))
+           .add(meanLAI.divide(6).multiply(0.3)); // Normalized LAI
+
+Map.addLayer(fhi, {min:0, max:1, palette:['red','yellow','green']}, 'Forest Health Index');
+
+// ======================================================
+// 🔹 Step 10: Add Categorical Legend for Forest Health Index
+// ======================================================
+function addCategoricalLegend(map) {
+  var legend = ui.Panel({
+    style: {
+      position: 'bottom-left',
+      padding: '8px 15px',
+      backgroundColor: 'white',
+      border: '1px solid black'
+    }
+  });
+
+  // Legend title
+  var legendTitle = ui.Label({
+    value: 'Forest Health Index',
+    style: {fontWeight: 'bold', fontSize: '14px', margin: '0 0 6px 0'}
+  });
+  legend.add(legendTitle);
+
+  // Define categories
+  var categories = [
+    {name: 'Low (0-0.33)', color: 'red'},
+    {name: 'Medium (0.34-0.66)', color: 'yellow'},
+    {name: 'High (0.67-1)', color: 'green'}
+  ];
+
+  // Add each category to the legend
+  categories.forEach(function(cat) {
+    var colorBox = ui.Label({
+      style: {
+        backgroundColor: cat.color,
+        padding: '8px',
+        margin: '0 0 4px 0'
+      }
+    });
+
+    var description = ui.Label({
+      value: cat.name,
+      style: {margin: '0 0 4px 6px'}
+    });
+
+    var row = ui.Panel({
+      widgets: [colorBox, description],
+      layout: ui.Panel.Layout.Flow('horizontal')
+    });
+
+    legend.add(row);
+  });
+
+  map.add(legend);
+}
+
+// Add categorical legend to map
+addCategoricalLegend(Map);
+
+
+// ======================================================
+// 🔹 Step 10: Export Results (Optional)
+// ======================================================
+Export.image.toDrive({
+  image: fhi,
+  description: 'Forest_Health_Index',
+  scale: 30,
+  region: aoi,
+  maxPixels: 1e13
+});
